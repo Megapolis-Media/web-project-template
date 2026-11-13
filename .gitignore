@@ -1,18 +1,62 @@
+# Secrets and local environment. Example must contain placeholders only.
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+/.secrets/
+/private/
+/data/
+/backups/
+/dumps/
+
+# AI scratch work, brainstorming, intermediate generated assets and downloads.
+/work/
+/scratch/
+/.ai/
+/artifacts/
+/.artifacts/
+/tmp/
+/temp/
+/downloads/
+/exports/
+/screenshots/
+/test-images/
+/generated-drafts/
+/docs/superpowers/
+
+# Local worktree directories; never add nested repositories.
+/.worktrees/
+/worktrees/
+
+# Dependencies, build outputs, caches and test reports.
 node_modules/
 dist/
 build/
 coverage/
 .next/
 .nuxt/
+.cache/
+.turbo/
+.parcel-cache/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+test-results/
+playwright-report/
 *.log
+*.tmp
+*.bak
+
+# Personal editor/OS settings.
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-*.pem
-*.key
-*.pfx
-*.p12
+
+# Ready site assets (e.g. public/assets and src/assets) remain tracked.
+# Do not add blanket image ignores such as *.png, *.jpg or *.svg.

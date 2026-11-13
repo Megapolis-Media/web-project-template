@@ -92,8 +92,8 @@ foreach ($branch in @('master', 'dev')) {
 }
 
 $null = Invoke-GitHub PATCH "repos/$Owner/$Name" @{
-    default_branch = 'dev'; allow_merge_commit = $true; allow_squash_merge = $true
-    allow_rebase_merge = $false; delete_branch_on_merge = $true; allow_auto_merge = $false
+    default_branch = 'dev'; allow_merge_commit = $true; allow_squash_merge = $false
+    allow_rebase_merge = $false; delete_branch_on_merge = $false; allow_auto_merge = $false
 }
 $null = Invoke-GitHub PUT "repos/$Owner/$Name/actions/permissions" @{ enabled = $false }
 
@@ -103,7 +103,7 @@ $commonRules = @(
     @{ type = 'pull_request'; parameters = @{
         required_approving_review_count = 0; dismiss_stale_reviews_on_push = $true
         require_code_owner_review = $false; require_last_push_approval = $false
-        required_review_thread_resolution = $true; allowed_merge_methods = @('merge', 'squash')
+        required_review_thread_resolution = $true; allowed_merge_methods = @('merge')
     } }
 )
 $null = Invoke-GitHub POST "repos/$Owner/$Name/rulesets" @{
@@ -128,6 +128,7 @@ $final = Invoke-GitHub GET "repos/$Owner/$Name" $null
 $branches = @(Invoke-GitHub GET "repos/$Owner/$Name/branches" $null)
 $rulesets = @(Invoke-GitHub GET "repos/$Owner/$Name/rulesets" $null)
 $actions = Invoke-GitHub GET "repos/$Owner/$Name/actions/permissions" $null
+if ($final.delete_branch_on_merge -or $final.allow_squash_merge -or $final.allow_rebase_merge) { throw 'Persistent-branch merge settings verification failed.' }
 if ($final.private -or $final.default_branch -ne 'dev') { throw 'Visibility/default branch verification failed.' }
 foreach ($branch in @('master', 'dev')) {
     if ($branches.name -notcontains $branch) { throw "Missing $branch branch." }

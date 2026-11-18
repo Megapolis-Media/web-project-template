@@ -7,7 +7,7 @@ param(
     [ValidatePattern('^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$')][string]$Template,
     [Parameter(Mandatory, ParameterSetName = 'Seed')][string]$SeedPath,
     [Parameter(ParameterSetName = 'Seed')][switch]$IsTemplate,
-    [string]$Description = 'Website project: dev via PR, production managed by owner'
+    [string]$Description = 'Website project: shared dev, production managed by owner'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -97,38 +97,88 @@ $null = Invoke-GitHub PATCH "repos/$Owner/$Name" @{
 }
 $null = Invoke-GitHub PUT "repos/$Owner/$Name/actions/permissions" @{ enabled = $false }
 
-$commonRules = @(
-    @{ type = 'deletion' },
-    @{ type = 'non_fast_forward' },
-    @{ type = 'pull_request'; parameters = @{
-        required_approving_review_count = 0; dismiss_stale_reviews_on_push = $true
-        require_code_owner_review = $false; require_last_push_approval = $false
-        required_review_thread_resolution = $true; allowed_merge_methods = @('merge')
-    } }
-)
-$null = Invoke-GitHub POST "repos/$Owner/$Name/rulesets" @{
-    name = 'Shared branches - PR required'; target = 'branch'; enforcement = 'active'; bypass_actors = @()
-    conditions = @{ ref_name = @{ include = @('refs/heads/master', 'refs/heads/dev'); exclude = @() } }
-    rules = $commonRules
-}
+$pullRequestRule = @{ type = 'pull_request'; parameters = @{
+    required_approving_review_count = 0; dismiss_stale_reviews_on_push = $true
+    require_code_owner_review = $false; require_last_push_approval = $false
+    required_review_thread_resolution = $true; allowed_merge_methods = @('merge')
+} }
+$updateRule = @{ type = 'update'; parameters = @{ update_allows_fetch_and_merge = $false } }
+$ownerBypass = @(@{ actor_type = 'User'; actor_id = $user.id; bypass_mode = 'always' })
 $adminBypass = @(@{ actor_type = 'RepositoryRole'; actor_id = 5; bypass_mode = 'always' })
-$null = Invoke-GitHub POST "repos/$Owner/$Name/rulesets" @{
-    name = 'Production - admin updates only'; target = 'branch'; enforcement = 'active'; bypass_actors = $adminBypass
-    conditions = @{ ref_name = @{ include = @('refs/heads/master'); exclude = @() } }
-    rules = @(@{ type = 'update'; parameters = @{ update_allows_fetch_and_merge = $false } })
-}
-$null = Invoke-GitHub POST "repos/$Owner/$Name/rulesets" @{
-    name = 'Release tags - admin only'; target = 'tag'; enforcement = 'active'; bypass_actors = $adminBypass
-    conditions = @{ ref_name = @{ include = @('~ALL'); exclude = @() } }
-    rules = @(@{ type = 'creation' }, @{ type = 'update'; parameters = @{ update_allows_fetch_and_merge = $false } }, @{ type = 'deletion' })
+$rulesetsEndpoint = "repos/$Owner/$Name/rulesets"
+$rulesets = @(
+    @{
+        name = 'Shared branches - no force push or deletion'; target = 'branch'; enforcement = 'active'
+        bypass_actors = @()
+        conditions = @{ ref_name = @{ include = @('refs/heads/master', 'refs/heads/dev'); exclude = @() } }
+        rules = @(@{ type = 'deletion' }, @{ type = 'non_fast_forward' })
+    },
+    @{
+        name = 'Development - PR except approved team'; target = 'branch'; enforcement = 'active'
+        bypass_actors = $ownerBypass
+        conditions = @{ ref_name = @{ include = @('refs/heads/dev'); exclude = @() } }
+        rules = @($pullRequestRule)
+    },
+    @{
+        name = 'Production - PR required'; target = 'branch'; enforcement = 'active'
+        bypass_actors = @()
+        conditions = @{ ref_name = @{ include = @('refs/heads/master'); exclude = @() } }
+        rules = @($pullRequestRule)
+    },
+    @{
+        name = 'Production - owner updates only'; target = 'branch'; enforcement = 'active'
+        bypass_actors = $ownerBypass
+        conditions = @{ ref_name = @{ include = @('refs/heads/master'); exclude = @() } }
+        rules = @($updateRule)
+    },
+    @{
+        name = 'Release tags - admin only'; target = 'tag'; enforcement = 'active'
+        bypass_actors = $adminBypass
+        conditions = @{ ref_name = @{ include = @('~ALL'); exclude = @() } }
+        rules = @(@{ type = 'creation' }, $updateRule, @{ type = 'deletion' })
+    }
+)
+$createdRulesets = @(foreach ($expected in $rulesets) {
+    Invoke-GitHub POST $rulesetsEndpoint $expected
+})
+
+# Check persisted rules and bypass lists under the owner's credentials.
+for ($index = 0; $index -lt $rulesets.Count; $index++) {
+    $expected = $rulesets[$index]
+    $actual = Invoke-GitHub GET "$rulesetsEndpoint/$($createdRulesets[$index].id)" $null
+    $expectedRefs = $expected.conditions.ref_name.include | Sort-Object
+    $actualRefs = $actual.conditions.ref_name.include | Sort-Object
+    $expectedTypes = $expected.rules.type | Sort-Object
+    $actualTypes = $actual.rules.type | Sort-Object
+    if ($actual.name -ne $expected.name -or $actual.target -ne $expected.target -or
+        $actual.enforcement -ne 'active' -or ($actualRefs -join ',') -ne ($expectedRefs -join ',') -or
+        $actual.conditions.ref_name.exclude -or ($actualTypes -join ',') -ne ($expectedTypes -join ',')) {
+        throw "Ruleset verification failed: $($expected.name)."
+    }
+    if ($expectedTypes -contains 'pull_request' -and
+        ($actual.rules[0].parameters.allowed_merge_methods -join ',') -ne 'merge') {
+        throw "Merge method verification failed: $($expected.name)."
+    }
+    if (-not $actual.PSObject.Properties['bypass_actors'] -or
+        @($actual.bypass_actors).Count -ne $expected.bypass_actors.Count) {
+        throw "Bypass verification failed: $($expected.name)."
+    }
+    if ($expected.bypass_actors.Count) {
+        $expectedActor = $expected.bypass_actors[0]
+        $actualActor = $actual.bypass_actors[0]
+        if ($actualActor.actor_type -ne $expectedActor.actor_type -or
+            $actualActor.actor_id -ne $expectedActor.actor_id -or
+            $actualActor.bypass_mode -ne $expectedActor.bypass_mode) {
+            throw "Unexpected bypass actor: $($expected.name)."
+        }
+    }
 }
 
 # Read back actual settings; fail rather than claim a partial setup is complete.
 $final = Invoke-GitHub GET "repos/$Owner/$Name" $null
 $branches = @(Invoke-GitHub GET "repos/$Owner/$Name/branches" $null)
-$rulesets = @(Invoke-GitHub GET "repos/$Owner/$Name/rulesets" $null)
 $actions = Invoke-GitHub GET "repos/$Owner/$Name/actions/permissions" $null
-if ($final.delete_branch_on_merge -or $final.allow_squash_merge -or $final.allow_rebase_merge) { throw 'Persistent-branch merge settings verification failed.' }
+if (!$final.allow_merge_commit -or $final.delete_branch_on_merge -or $final.allow_squash_merge -or $final.allow_rebase_merge) { throw 'Merge settings verification failed.' }
 if ($final.private -or $final.default_branch -ne 'dev') { throw 'Visibility/default branch verification failed.' }
 foreach ($branch in @('master', 'dev')) {
     if ($branches.name -notcontains $branch) { throw "Missing $branch branch." }
@@ -136,8 +186,7 @@ foreach ($branch in @('master', 'dev')) {
     foreach ($expected in @('pull_request', 'deletion', 'non_fast_forward')) {
         if ($rules.type -notcontains $expected) { throw "Missing $expected rule on $branch." }
     }
-    if ($branch -eq 'master' -and $rules.type -notcontains 'update') { throw 'Master is not restricted to admin updates.' }
+    if ($branch -eq 'master' -and $rules.type -notcontains 'update') { throw 'Master is not restricted to owner updates.' }
 }
-if (@($rulesets | Where-Object enforcement -eq 'active').Count -ne 3) { throw 'Expected three active rulesets.' }
 if ($actions.enabled) { throw 'Actions were unexpectedly enabled.' }
-Write-Host "Verified: $($final.html_url) | public | default dev | PR required | master admin-only | Actions disabled"
+Write-Host "Verified: $($final.html_url) | public | shared dev with owner bypass | master owner-only via PR | Actions disabled"

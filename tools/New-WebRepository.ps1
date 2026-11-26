@@ -104,6 +104,8 @@ $pullRequestRule = @{ type = 'pull_request'; parameters = @{
 } }
 $updateRule = @{ type = 'update'; parameters = @{ update_allows_fetch_and_merge = $false } }
 $ownerBypass = @(@{ actor_type = 'User'; actor_id = $user.id; bypass_mode = 'always' })
+# GitHub identifies the Write repository role as RepositoryRole 4.
+$developerBypass = $ownerBypass + @(@{ actor_type = 'RepositoryRole'; actor_id = 4; bypass_mode = 'always' })
 $adminBypass = @(@{ actor_type = 'RepositoryRole'; actor_id = 5; bypass_mode = 'always' })
 $rulesetsEndpoint = "repos/$Owner/$Name/rulesets"
 $rulesets = @(
@@ -115,7 +117,7 @@ $rulesets = @(
     },
     @{
         name = 'Development - PR except approved team'; target = 'branch'; enforcement = 'active'
-        bypass_actors = $ownerBypass
+        bypass_actors = $developerBypass
         conditions = @{ ref_name = @{ include = @('refs/heads/dev'); exclude = @() } }
         rules = @($pullRequestRule)
     },
@@ -159,18 +161,11 @@ for ($index = 0; $index -lt $rulesets.Count; $index++) {
         ($actual.rules[0].parameters.allowed_merge_methods -join ',') -ne 'merge') {
         throw "Merge method verification failed: $($expected.name)."
     }
+    $expectedActorKeys = @($expected.bypass_actors | ForEach-Object { "$($_.actor_type)/$($_.actor_id)/$($_.bypass_mode)" } | Sort-Object)
+    $actualActorKeys = @($actual.bypass_actors | ForEach-Object { "$($_.actor_type)/$($_.actor_id)/$($_.bypass_mode)" } | Sort-Object)
     if (-not $actual.PSObject.Properties['bypass_actors'] -or
-        @($actual.bypass_actors).Count -ne $expected.bypass_actors.Count) {
+        ($actualActorKeys -join ',') -cne ($expectedActorKeys -join ',')) {
         throw "Bypass verification failed: $($expected.name)."
-    }
-    if ($expected.bypass_actors.Count) {
-        $expectedActor = $expected.bypass_actors[0]
-        $actualActor = $actual.bypass_actors[0]
-        if ($actualActor.actor_type -ne $expectedActor.actor_type -or
-            $actualActor.actor_id -ne $expectedActor.actor_id -or
-            $actualActor.bypass_mode -ne $expectedActor.bypass_mode) {
-            throw "Unexpected bypass actor: $($expected.name)."
-        }
     }
 }
 
@@ -189,4 +184,4 @@ foreach ($branch in @('master', 'dev')) {
     if ($branch -eq 'master' -and $rules.type -notcontains 'update') { throw 'Master is not restricted to owner updates.' }
 }
 if ($actions.enabled) { throw 'Actions were unexpectedly enabled.' }
-Write-Host "Verified: $($final.html_url) | public | shared dev with owner bypass | master owner-only via PR | Actions disabled"
+Write-Host "Verified: $($final.html_url) | public | shared dev with Write access | master owner-only via PR | Actions disabled"
